@@ -426,7 +426,9 @@ def extract_musicxml_text(path):
 
 def add_red_noteheads_to_musicxml(path, highlights):
     """
-    MusicXML内の該当音符に赤色の notehead を追加する。
+    MusicXML内の該当音符に color 属性を追加する。
+    <notehead>要素を追加するとOpenSheetMusicDisplayで読めない場合があるため、
+    note要素そのものに color="#d00000" を付ける。
     """
     xml_text = extract_musicxml_text(path)
     root = ET.fromstring(xml_text)
@@ -445,24 +447,10 @@ def add_red_noteheads_to_musicxml(path, highlights):
             if rest is not None:
                 continue
 
-            # chord の2音目以降はカウントを増やさない
             chord = note.find(f"{ns}chord")
 
             if (voice_index, note_counter) in highlights:
-                existing_notehead = note.find(f"{ns}notehead")
-
-                if existing_notehead is None:
-                    notehead = ET.Element(f"{ns}notehead")
-                    notehead.text = "normal"
-
-                    pitch = note.find(f"{ns}pitch")
-                    children = list(note)
-                    insert_index = children.index(pitch) + 1 if pitch is not None else 0
-                    note.insert(insert_index, notehead)
-                else:
-                    notehead = existing_notehead
-
-                notehead.set("color", "#d00000")
+                note.set("color", "#d00000")
 
             if chord is None:
                 note_counter += 1
