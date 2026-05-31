@@ -305,6 +305,109 @@ def check_melodic_leaps(notes_by_part):
 
     return results
 
+def collect_highlights(results):
+    """
+    検出結果から、赤く表示する音符の位置を集める。
+    voice_index = 0:Soprano, 1:Alto, 2:Tenor, 3:Bass
+    note_index = 各声部内で何番目の音か
+    """
+    highlights = set()
+
+    for r in results:
+        if r["type"] == "parallel":
+            voice1 = VOICE_NAMES.index(r["voices"][0])
+            voice2 = VOICE_NAMES.index(r["voices"][1])
+            k = r["note_index"]
+
+            highlights.add((voice1, k))
+            highlights.add((voice1, k + 1))
+            highlights.add((voice2, k))
+            highlights.add((voice2, k + 1))
+
+        elif r["type"] == "hidden":
+            voice1 = VOICE_NAMES.index(r["voices"][0])
+            voice2 = VOICE_NAMES.index(r["voices"][1])
+            k = r["note_index"]
+
+            highlights.add((voice1, k + 1))
+            highlights.add((voice2, k + 1))
+
+        elif r["type"] == "voice_crossing":
+            voice1 = VOICE_NAMES.index(r["voices"][0])
+            voice2 = VOICE_NAMES.index(r["voices"][1])
+            k = r["note_index"]
+
+            highlights.add((voice1, k))
+            highlights.add((voice2, k))
+
+        elif r["type"] == "voice_range":
+            voice = VOICE_NAMES.index(r["voice"])
+            k = r["note_index"]
+
+            highlights.add((voice, k))
+
+        elif r["type"] == "voice_spacing":
+            voice1 = VOICE_NAMES.index(r["voices"][0])
+            voice2 = VOICE_NAMES.index(r["voices"][1])
+            k = r["note_index"]
+
+            highlights.add((voice1, k))
+            highlights.add((voice2, k))
+
+        elif r["type"] == "melodic_leap":
+            voice = VOICE_NAMES.index(r["voice"])
+            k = r["note_index"]
+
+            highlights.add((voice, k))
+            highlights.add((voice, k + 1))
+
+    return highlights
+
+
+def add_red_noteheads_to_musicxml(path, highlights):
+    """
+    MusicXML内の該当音符に <notehead color="#d00000">normal</notehead> を追加する。
+    """
+
+    ET.register_namespace("", "http://www.musicxml.org/ns/musicxml")
+
+    tree = ET.parse(path)
+    root = tree.getroot()
+
+    ns = ""
+    if root.tag.startswith("{"):
+        ns = root.tag.split("}")[0] + "}"
+
+    parts = root.findall(f".//{ns}part")
+
+    for voice_index, part in enumerate(parts[:4]):
+        note_counter = 0
+
+        for note in part.findall(f".//{ns}note"):
+            rest = note.find(f"{ns}rest")
+            if rest is not None:
+                continue
+
+            if (voice_index, note_counter) in highlights:
+                existing_notehead = note.find(f"{ns}notehead")
+
+                if existing_notehead is None:
+                    notehead = ET.Element(f"{ns}notehead")
+                    notehead.text = "normal"
+
+                    # pitch の後あたりに入れる
+                    pitch = note.find(f"{ns}pitch")
+                    insert_index = list(note).index(pitch) + 1 if pitch is not None else 0
+                    note.insert(insert_index, notehead)
+                else:
+                    notehead = existing_notehead
+
+                notehead.set("color", "#d00000")
+
+            note_counter += 1
+
+    return ET.tostring(root, encoding="unicode")
+
 
 def analyze_musicxml(path):
     score = converter.parse(path)
