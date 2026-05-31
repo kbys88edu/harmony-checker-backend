@@ -9,8 +9,8 @@ import zipfile
 
 app = FastAPI()
 
-# まずはテストしやすいように広く許可します。
-# 安定したら allow_origins を ateliercompositionson.com のみに戻してもよいです。
+# テスト中は広く許可します。
+# 本番で制限したい場合は allow_origins を ateliercompositionson.com のみに戻してください。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,11 +45,13 @@ MELODIC_LEAP_LIMITS = {
 
 def get_parts(score):
     parts = score.parts
+
     if len(parts) < 4:
         raise ValueError(
             "4声のMusicXMLが必要です。"
             "Soprano, Alto, Tenor, Bass の4パートを用意してください。"
         )
+
     return parts[:4]
 
 
@@ -58,11 +60,14 @@ def get_notes_by_part(parts):
 
     for part in parts:
         notes = []
+
         for n in part.recurse().notes:
             if n.isNote:
                 notes.append(n)
             elif n.isChord:
+                # 和音が入っている場合は、一番上の音を代表音として扱う
                 notes.append(n.notes[-1])
+
         notes_by_part.append(notes)
 
     return notes_by_part
@@ -74,16 +79,20 @@ def is_perfect_fifth_or_octave(note1, note2):
 
     if simple_name == "P5":
         return "perfect_fifth"
+
     if simple_name == "P8" or simple_name == "P1":
         return "perfect_octave"
+
     return None
 
 
 def direction(note_a, note_b):
     if note_b.pitch.midi > note_a.pitch.midi:
         return "up"
+
     if note_b.pitch.midi < note_a.pitch.midi:
         return "down"
+
     return "same"
 
 
@@ -101,8 +110,10 @@ def check_parallel_intervals(notes_by_part):
             length = min(len(voice1), len(voice2))
 
             for k in range(length - 1):
-                a1, a2 = voice1[k], voice1[k + 1]
-                b1, b2 = voice2[k], voice2[k + 1]
+                a1 = voice1[k]
+                a2 = voice1[k + 1]
+                b1 = voice2[k]
+                b2 = voice2[k + 1]
 
                 interval_before = is_perfect_fifth_or_octave(a1, b1)
                 interval_after = is_perfect_fifth_or_octave(a2, b2)
@@ -112,7 +123,11 @@ def check_parallel_intervals(notes_by_part):
                     dir2 = direction(b1, b2)
 
                     if dir1 == dir2 and dir1 != "same":
-                        rule_name = "連続5度" if interval_before == "perfect_fifth" else "連続8度"
+                        rule_name = (
+                            "連続5度"
+                            if interval_before == "perfect_fifth"
+                            else "連続8度"
+                        )
 
                         results.append({
                             "type": "parallel",
@@ -121,7 +136,10 @@ def check_parallel_intervals(notes_by_part):
                             "note_index": k,
                             "measure_before": a1.measureNumber,
                             "measure_after": a2.measureNumber,
-                            "message": f"{VOICE_NAMES[i]} と {VOICE_NAMES[j]} に {rule_name} があります。"
+                            "message": (
+                                f"{VOICE_NAMES[i]} と {VOICE_NAMES[j]} に "
+                                f"{rule_name} があります。"
+                            ),
                         })
 
     return results
@@ -139,33 +157,50 @@ def check_hidden_intervals(notes_by_part):
             length = min(len(upper_voice), len(lower_voice))
 
             for k in range(length - 1):
-                upper_before, upper_after = upper_voice[k], upper_voice[k + 1]
-                lower_before, lower_after = lower_voice[k], lower_voice[k + 1]
+                upper_before = upper_voice[k]
+                upper_after = upper_voice[k + 1]
+                lower_before = lower_voice[k]
+                lower_after = lower_voice[k + 1]
 
                 before_interval = is_perfect_fifth_or_octave(upper_before, lower_before)
                 after_interval = is_perfect_fifth_or_octave(upper_after, lower_after)
 
+                # 連続5度・8度は別関数で検出する
                 if before_interval and after_interval and before_interval == after_interval:
                     continue
 
+                # 到達先が完全5度または完全8度でなければ対象外
                 if after_interval is None:
                     continue
 
                 upper_dir = direction(upper_before, upper_after)
                 lower_dir = direction(lower_before, lower_after)
 
+                # 同方向でなければ隠伏ではない
                 if upper_dir != lower_dir:
                     continue
 
+                # どちらかが動いていない場合は除外
                 if upper_dir == "same" or lower_dir == "same":
                     continue
 
+                # 上声が3半音以上動く場合を跳躍として扱う
                 upper_leap = melodic_leap_size(upper_before, upper_after)
+
                 if upper_leap < 3:
                     continue
 
-                rule_name = "隠伏5度" if after_interval == "perfect_fifth" else "隠伏8度"
-                severity = "error" if upper_name == "Soprano" and lower_name == "Bass" else "warning"
+                rule_name = (
+                    "隠伏5度"
+                    if after_interval == "perfect_fifth"
+                    else "隠伏8度"
+                )
+
+                severity = (
+                    "error"
+                    if upper_name == "Soprano" and lower_name == "Bass"
+                    else "warning"
+                )
 
                 results.append({
                     "type": "hidden",
@@ -177,8 +212,9 @@ def check_hidden_intervals(notes_by_part):
                     "measure_after": upper_after.measureNumber,
                     "message": (
                         f"{upper_name} と {lower_name} に {rule_name} の可能性があります。"
-                        f"同方向に進み、到達先が完全5度または完全8度で、上声が跳躍しています。"
-                    )
+                        f"同方向に進み、到達先が完全5度または完全8度で、"
+                        f"上声が跳躍しています。"
+                    ),
                 })
 
     return results
@@ -186,12 +222,14 @@ def check_hidden_intervals(notes_by_part):
 
 def check_voice_crossing(notes_by_part):
     results = []
+
     min_length = min(len(notes) for notes in notes_by_part)
 
     for k in range(min_length):
         for i in range(3):
             upper_voice = notes_by_part[i][k]
             lower_voice = notes_by_part[i + 1][k]
+
             upper_name = VOICE_NAMES[i]
             lower_name = VOICE_NAMES[i + 1]
 
@@ -202,7 +240,9 @@ def check_voice_crossing(notes_by_part):
                     "voices": [upper_name, lower_name],
                     "note_index": k,
                     "measure": upper_voice.measureNumber,
-                    "message": f"{upper_name} が {lower_name} より低くなっています。"
+                    "message": (
+                        f"{upper_name} が {lower_name} より低くなっています。"
+                    ),
                 })
 
     return results
@@ -230,7 +270,7 @@ def check_voice_ranges(notes_by_part):
                     "message": (
                         f"{voice_name} の {pitch_name} は低すぎます。"
                         f"推奨声域は {voice_range['label']} です。"
-                    )
+                    ),
                 })
 
             elif midi > voice_range["max"]:
@@ -244,7 +284,7 @@ def check_voice_ranges(notes_by_part):
                     "message": (
                         f"{voice_name} の {pitch_name} は高すぎます。"
                         f"推奨声域は {voice_range['label']} です。"
-                    )
+                    ),
                 })
 
     return results
@@ -252,18 +292,21 @@ def check_voice_ranges(notes_by_part):
 
 def check_voice_spacing(notes_by_part):
     results = []
+
     min_length = min(len(notes) for notes in notes_by_part)
 
     for k in range(min_length):
         for i in range(3):
             upper_note = notes_by_part[i][k]
             lower_note = notes_by_part[i + 1][k]
+
             upper_name = VOICE_NAMES[i]
             lower_name = VOICE_NAMES[i + 1]
 
             spacing_rule = VOICE_SPACING_LIMITS[(upper_name, lower_name)]
             distance = upper_note.pitch.midi - lower_note.pitch.midi
 
+            # 声部交差している場合は交差チェック側で扱う
             if distance < 0:
                 continue
 
@@ -279,7 +322,7 @@ def check_voice_spacing(notes_by_part):
                         f"{upper_name} と {lower_name} の間隔が広すぎます。"
                         f"現在 {distance} 半音離れています。"
                         f"目安は {spacing_rule['label']} です。"
-                    )
+                    ),
                 })
 
     return results
@@ -298,7 +341,11 @@ def check_melodic_leaps(notes_by_part):
             leap = melodic_leap_size(note_before, note_after)
 
             if leap > limit["max_semitones"]:
-                direction_label = "上行" if note_after.pitch.midi > note_before.pitch.midi else "下行"
+                direction_label = (
+                    "上行"
+                    if note_after.pitch.midi > note_before.pitch.midi
+                    else "下行"
+                )
 
                 results.append({
                     "type": "melodic_leap",
@@ -316,7 +363,7 @@ def check_melodic_leaps(notes_by_part):
                         f"{note_after.pitch.nameWithOctave} へ{direction_label}し、"
                         f"{leap} 半音動いています。"
                         f"目安は {limit['label']} です。"
-                    )
+                    ),
                 })
 
     return results
@@ -414,48 +461,15 @@ def extract_musicxml_text(path):
                 ns = container_root.tag.split("}")[0] + "}"
 
             rootfile = container_root.find(f".//{ns}rootfile")
+
             if rootfile is None:
                 raise ValueError("mxl内にrootfileが見つかりません。")
 
             musicxml_path = rootfile.attrib["full-path"]
-            return z.read(musicxml_path).decode("utf-8")
+            return z.read(musicxml_path).decode("utf-8", errors="replace")
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         return f.read()
-
-
-def add_red_noteheads_to_musicxml(path, highlights):
-    """
-    MusicXML内の該当音符に color 属性を追加する。
-    <notehead>要素を追加するとOpenSheetMusicDisplayで読めない場合があるため、
-    note要素そのものに color="#d00000" を付ける。
-    """
-    xml_text = extract_musicxml_text(path)
-    root = ET.fromstring(xml_text)
-
-    ns = ""
-    if root.tag.startswith("{"):
-        ns = root.tag.split("}")[0] + "}"
-
-    parts = root.findall(f".//{ns}part")
-
-    for voice_index, part in enumerate(parts[:4]):
-        note_counter = 0
-
-        for note in part.findall(f".//{ns}note"):
-            rest = note.find(f"{ns}rest")
-            if rest is not None:
-                continue
-
-            chord = note.find(f"{ns}chord")
-
-            if (voice_index, note_counter) in highlights:
-                note.set("color", "#d00000")
-
-            if chord is None:
-                note_counter += 1
-
-    return ET.tostring(root, encoding="unicode")
 
 
 @app.get("/")
@@ -475,14 +489,18 @@ async def analyze(file: UploadFile = File(...)):
     try:
         results = analyze_musicxml(tmp_path)
         highlights = collect_highlights(results)
-        annotated_xml = add_red_noteheads_to_musicxml(tmp_path, highlights)
+        original_xml = extract_musicxml_text(tmp_path)
 
         return {
             "ok": True,
             "filename": file.filename,
             "count": len(results),
             "results": results,
-            "annotated_xml": annotated_xml,
+            "highlights": [
+                {"voice_index": voice_index, "note_index": note_index}
+                for voice_index, note_index in sorted(highlights)
+            ],
+            "original_xml": original_xml,
         }
 
     except Exception as e:
@@ -491,7 +509,8 @@ async def analyze(file: UploadFile = File(...)):
             "filename": file.filename,
             "error": str(e),
             "results": [],
-            "annotated_xml": None,
+            "highlights": [],
+            "original_xml": None,
         }
 
     finally:
