@@ -4,20 +4,17 @@ from music21 import converter, interval
 import tempfile
 import os
 import xml.etree.ElementTree as ET
+import zipfile
 
 
 app = FastAPI()
 
-# あとで ateliercompositionson.com だけに制限します
+# まずはテストしやすいように広く許可します。
+# 安定したら allow_origins を ateliercompositionson.com のみに戻してもよいです。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://ateliercompositionson.com",
-        "https://www.ateliercompositionson.com",
-        "http://localhost:5500",
-        "http://127.0.0.1:5500",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -49,7 +46,10 @@ MELODIC_LEAP_LIMITS = {
 def get_parts(score):
     parts = score.parts
     if len(parts) < 4:
-        raise ValueError("4声のMusicXMLが必要です。Soprano, Alto, Tenor, Bass の4パートを用意してください。")
+        raise ValueError(
+            "4声のMusicXMLが必要です。"
+            "Soprano, Alto, Tenor, Bass の4パートを用意してください。"
+        )
     return parts[:4]
 
 
@@ -118,6 +118,7 @@ def check_parallel_intervals(notes_by_part):
                             "type": "parallel",
                             "rule": rule_name,
                             "voices": [VOICE_NAMES[i], VOICE_NAMES[j]],
+                            "note_index": k,
                             "measure_before": a1.measureNumber,
                             "measure_after": a2.measureNumber,
                             "message": f"{VOICE_NAMES[i]} と {VOICE_NAMES[j]} に {rule_name} があります。"
@@ -171,6 +172,7 @@ def check_hidden_intervals(notes_by_part):
                     "rule": rule_name,
                     "voices": [upper_name, lower_name],
                     "severity": severity,
+                    "note_index": k,
                     "measure_before": upper_before.measureNumber,
                     "measure_after": upper_after.measureNumber,
                     "message": (
@@ -198,6 +200,7 @@ def check_voice_crossing(notes_by_part):
                     "type": "voice_crossing",
                     "rule": "声部交差",
                     "voices": [upper_name, lower_name],
+                    "note_index": k,
                     "measure": upper_voice.measureNumber,
                     "message": f"{upper_name} が {lower_name} より低くなっています。"
                 })
@@ -212,7 +215,7 @@ def check_voice_ranges(notes_by_part):
         voice_name = VOICE_NAMES[i]
         voice_range = VOICE_RANGES[voice_name]
 
-        for n in notes:
+        for k, n in enumerate(notes):
             midi = n.pitch.midi
             pitch_name = n.pitch.nameWithOctave
 
@@ -221,9 +224,13 @@ def check_voice_ranges(notes_by_part):
                     "type": "voice_range",
                     "rule": "声域外",
                     "voice": voice_name,
+                    "note_index": k,
                     "measure": n.measureNumber,
                     "pitch": pitch_name,
-                    "message": f"{voice_name} の {pitch_name} は低すぎます。推奨声域は {voice_range['label']} です。"
+                    "message": (
+                        f"{voice_name} の {pitch_name} は低すぎます。"
+                        f"推奨声域は {voice_range['label']} です。"
+                    )
                 })
 
             elif midi > voice_range["max"]:
@@ -231,9 +238,13 @@ def check_voice_ranges(notes_by_part):
                     "type": "voice_range",
                     "rule": "声域外",
                     "voice": voice_name,
+                    "note_index": k,
                     "measure": n.measureNumber,
                     "pitch": pitch_name,
-                    "message": f"{voice_name} の {pitch_name} は高すぎます。推奨声域は {voice_range['label']} です。"
+                    "message": (
+                        f"{voice_name} の {pitch_name} は高すぎます。"
+                        f"推奨声域は {voice_range['label']} です。"
+                    )
                 })
 
     return results
@@ -261,11 +272,13 @@ def check_voice_spacing(notes_by_part):
                     "type": "voice_spacing",
                     "rule": "声部間隔",
                     "voices": [upper_name, lower_name],
+                    "note_index": k,
                     "measure": upper_note.measureNumber,
                     "distance": distance,
                     "message": (
                         f"{upper_name} と {lower_name} の間隔が広すぎます。"
-                        f"現在 {distance} 半音離れています。目安は {spacing_rule['label']} です。"
+                        f"現在 {distance} 半音離れています。"
+                        f"目安は {spacing_rule['label']} です。"
                     )
                 })
 
@@ -291,6 +304,7 @@ def check_melodic_leaps(notes_by_part):
                     "type": "melodic_leap",
                     "rule": "大きすぎる跳躍",
                     "voice": voice_name,
+                    "note_index": k,
                     "measure_before": note_before.measureNumber,
                     "measure_after": note_after.measureNumber,
                     "pitch_before": note_before.pitch.nameWithOctave,
@@ -298,12 +312,31 @@ def check_melodic_leaps(notes_by_part):
                     "leap": leap,
                     "message": (
                         f"{voice_name} に大きすぎる跳躍があります。"
-                        f"{note_before.pitch.nameWithOctave} から {note_after.pitch.nameWithOctave} へ"
-                        f"{direction_label}し、{leap} 半音動いています。目安は {limit['label']} です。"
+                        f"{note_before.pitch.nameWithOctave} から "
+                        f"{note_after.pitch.nameWithOctave} へ{direction_label}し、"
+                        f"{leap} 半音動いています。"
+                        f"目安は {limit['label']} です。"
                     )
                 })
 
     return results
+
+
+def analyze_musicxml(path):
+    score = converter.parse(path)
+    parts = get_parts(score)
+    notes_by_part = get_notes_by_part(parts)
+
+    results = []
+    results.extend(check_parallel_intervals(notes_by_part))
+    results.extend(check_hidden_intervals(notes_by_part))
+    results.extend(check_voice_crossing(notes_by_part))
+    results.extend(check_voice_ranges(notes_by_part))
+    results.extend(check_voice_spacing(notes_by_part))
+    results.extend(check_melodic_leaps(notes_by_part))
+
+    return results
+
 
 def collect_highlights(results):
     """
@@ -364,15 +397,39 @@ def collect_highlights(results):
     return highlights
 
 
+def extract_musicxml_text(path):
+    """
+    .xml / .musicxml / .mxl から MusicXML本文を文字列として取り出す。
+    .mxl の場合は圧縮ファイル内の rootfile を読む。
+    """
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".mxl":
+        with zipfile.ZipFile(path, "r") as z:
+            container_xml = z.read("META-INF/container.xml")
+            container_root = ET.fromstring(container_xml)
+
+            ns = ""
+            if container_root.tag.startswith("{"):
+                ns = container_root.tag.split("}")[0] + "}"
+
+            rootfile = container_root.find(f".//{ns}rootfile")
+            if rootfile is None:
+                raise ValueError("mxl内にrootfileが見つかりません。")
+
+            musicxml_path = rootfile.attrib["full-path"]
+            return z.read(musicxml_path).decode("utf-8")
+
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 def add_red_noteheads_to_musicxml(path, highlights):
     """
-    MusicXML内の該当音符に <notehead color="#d00000">normal</notehead> を追加する。
+    MusicXML内の該当音符に赤色の notehead を追加する。
     """
-
-    ET.register_namespace("", "http://www.musicxml.org/ns/musicxml")
-
-    tree = ET.parse(path)
-    root = tree.getroot()
+    xml_text = extract_musicxml_text(path)
+    root = ET.fromstring(xml_text)
 
     ns = ""
     if root.tag.startswith("{"):
@@ -388,6 +445,9 @@ def add_red_noteheads_to_musicxml(path, highlights):
             if rest is not None:
                 continue
 
+            # chord の2音目以降はカウントを増やさない
+            chord = note.find(f"{ns}chord")
+
             if (voice_index, note_counter) in highlights:
                 existing_notehead = note.find(f"{ns}notehead")
 
@@ -395,34 +455,19 @@ def add_red_noteheads_to_musicxml(path, highlights):
                     notehead = ET.Element(f"{ns}notehead")
                     notehead.text = "normal"
 
-                    # pitch の後あたりに入れる
                     pitch = note.find(f"{ns}pitch")
-                    insert_index = list(note).index(pitch) + 1 if pitch is not None else 0
+                    children = list(note)
+                    insert_index = children.index(pitch) + 1 if pitch is not None else 0
                     note.insert(insert_index, notehead)
                 else:
                     notehead = existing_notehead
 
                 notehead.set("color", "#d00000")
 
-            note_counter += 1
+            if chord is None:
+                note_counter += 1
 
     return ET.tostring(root, encoding="unicode")
-
-
-def analyze_musicxml(path):
-    score = converter.parse(path)
-    parts = get_parts(score)
-    notes_by_part = get_notes_by_part(parts)
-
-    results = []
-    results.extend(check_parallel_intervals(notes_by_part))
-    results.extend(check_hidden_intervals(notes_by_part))
-    results.extend(check_voice_crossing(notes_by_part))
-    results.extend(check_voice_ranges(notes_by_part))
-    results.extend(check_voice_spacing(notes_by_part))
-    results.extend(check_melodic_leaps(notes_by_part))
-
-    return results
 
 
 @app.get("/")
@@ -441,19 +486,26 @@ async def analyze(file: UploadFile = File(...)):
 
     try:
         results = analyze_musicxml(tmp_path)
+        highlights = collect_highlights(results)
+        annotated_xml = add_red_noteheads_to_musicxml(tmp_path, highlights)
+
         return {
             "ok": True,
             "filename": file.filename,
             "count": len(results),
-            "results": results
+            "results": results,
+            "annotated_xml": annotated_xml,
         }
+
     except Exception as e:
         return {
             "ok": False,
             "filename": file.filename,
             "error": str(e),
-            "results": []
+            "results": [],
+            "annotated_xml": None,
         }
+
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
